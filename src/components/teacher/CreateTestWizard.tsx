@@ -21,22 +21,12 @@ export const CreateTestWizard = ({ teacherId, onComplete, onCancel }: CreateTest
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState('basic');
   const [testId, setTestId] = useState<string>('');
+  const [testCode, setTestCode] = useState<string>('');
   
   const [basicInfo, setBasicInfo] = useState({
     title: '',
     subject: '',
     duration_minutes: 60,
-  });
-
-  const [pdfInfo, setPdfInfo] = useState({
-    practice_pdf_url: '',
-    easy_pdf_url: '',
-    medium_pdf_url: '',
-    hard_pdf_url: '',
-    practice_question_count: 0,
-    easy_question_count: 0,
-    medium_question_count: 0,
-    hard_question_count: 0,
   });
 
   const generateTestCode = (subject: string) => {
@@ -49,7 +39,7 @@ export const CreateTestWizard = ({ teacherId, onComplete, onCancel }: CreateTest
     return code;
   };
 
-  const handleBasicInfoNext = () => {
+  const handleBasicInfoNext = async () => {
     if (!basicInfo.title || !basicInfo.subject) {
       toast({ title: 'Error', description: 'Please fill in all fields', variant: 'destructive' });
       return;
@@ -60,27 +50,29 @@ export const CreateTestWizard = ({ teacherId, onComplete, onCancel }: CreateTest
       return;
     }
 
-    // Generate test code
-    const testCode = generateTestCode(basicInfo.subject);
-    const newTestId = crypto.randomUUID();
+    const code = generateTestCode(basicInfo.subject);
     
-    // Save to localStorage
-    const newTest = {
-      id: newTestId,
-      testCode,
-      title: basicInfo.title,
-      subject: basicInfo.subject,
-      duration_minutes: basicInfo.duration_minutes,
-      teacherId: teacherId,
-      createdAt: new Date().toISOString(),
-      is_active: true,
-    };
-    
-    const allTests = JSON.parse(localStorage.getItem("tests") || "[]");
-    allTests.push(newTest);
-    localStorage.setItem("tests", JSON.stringify(allTests));
-    
-    setTestId(newTestId);
+    // Save to Supabase
+    const { data, error } = await supabase
+      .from('tests')
+      .insert({
+        test_code: code,
+        title: basicInfo.title,
+        subject: basicInfo.subject,
+        duration_minutes: basicInfo.duration_minutes,
+        teacher_id: teacherId,
+        is_active: true,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' });
+      return;
+    }
+
+    setTestId(data.id);
+    setTestCode(code);
     toast({ title: 'Success', description: 'Test created! Now add questions.' });
     setActiveTab('questions');
   };
@@ -88,29 +80,13 @@ export const CreateTestWizard = ({ teacherId, onComplete, onCancel }: CreateTest
   const handleFinalize = () => {
     if (!testId) return;
 
-    // Update test with PDF info in localStorage
-    const allTests = JSON.parse(localStorage.getItem("tests") || "[]");
-    const testIndex = allTests.findIndex((t: any) => t.id === testId);
-    
-    if (testIndex !== -1) {
-      allTests[testIndex] = {
-        ...allTests[testIndex],
-        ...pdfInfo,
-      };
-      localStorage.setItem("tests", JSON.stringify(allTests));
-      
-      const testCode = allTests[testIndex].testCode;
+    toast({
+      title: 'Test Created Successfully!',
+      description: `Test code: ${testCode}`,
+      duration: 5000,
+    });
 
-      toast({
-        title: 'Test Created Successfully!',
-        description: `Test code: ${testCode}`,
-        duration: 5000,
-      });
-
-      onComplete?.(testCode);
-    } else {
-      toast({ title: 'Error', description: 'Test not found', variant: 'destructive' });
-    }
+    onComplete?.(testCode);
   };
 
   return (
@@ -213,12 +189,7 @@ export const CreateTestWizard = ({ teacherId, onComplete, onCancel }: CreateTest
           </TabsContent>
 
           <TabsContent value="pdfs" className="mt-6">
-            {testId && (
-              <PDFUploader 
-                testId={testId} 
-                onPDFsChange={(updates) => setPdfInfo(prev => ({ ...prev, ...updates }))} 
-              />
-            )}
+            {testId && <PDFUploader testId={testId} />}
             <div className="flex gap-4 mt-6">
               <Button
                 variant="outline"

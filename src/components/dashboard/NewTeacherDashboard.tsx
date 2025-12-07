@@ -10,6 +10,8 @@ import { useToast } from "@/hooks/use-toast";
 import { Label } from "@/components/ui/label";
 import { CreateTestWizard } from "@/components/teacher/CreateTestWizard";
 import { TestEditor } from "@/components/teacher/TestEditor";
+import { useAuth } from "@/contexts/AuthContext";
+import { supabase } from "@/integrations/supabase/client";
 import sckoolLogo from "@/assets/sckool-logo.jpeg";
 
 type ActiveSection = "home" | "create" | "tests" | "analytics" | "students";
@@ -17,89 +19,71 @@ type ActiveSection = "home" | "create" | "tests" | "analytics" | "students";
 const NewTeacherDashboard = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const [teacher, setTeacher] = useState<any>(null);
+  const { user, profile, signOut, loading } = useAuth();
   const [tests, setTests] = useState<any[]>([]);
   const [allResults, setAllResults] = useState<any[]>([]);
   const [activeSection, setActiveSection] = useState<ActiveSection>("home");
   const [editingTestId, setEditingTestId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState({ title: '', subject: '', duration_minutes: 60 });
   const [editingQuestionsTestId, setEditingQuestionsTestId] = useState<string | null>(null);
-  
-  // Upload form
-  const [testTitle, setTestTitle] = useState("");
-  const [testSubject, setTestSubject] = useState("");
-  const [testDuration, setTestDuration] = useState("60");
+  const [students, setStudents] = useState<any[]>([]);
 
   useEffect(() => {
-    const currentTeacher = localStorage.getItem("currentTeacher");
-    if (!currentTeacher) {
-      navigate('/');
-      return;
+    if (!loading && user) {
+      fetchTests();
+      fetchResults();
+      fetchStudents();
     }
-    const teacherData = JSON.parse(currentTeacher);
-    setTeacher(teacherData);
+  }, [user, loading]);
 
-    const allTests = JSON.parse(localStorage.getItem("tests") || "[]");
-    const teacherTests = allTests.filter((t: any) => t.teacherId === teacherData.teacherId);
-    setTests(teacherTests);
+  const fetchTests = async () => {
+    if (!user) return;
+    
+    const { data, error } = await supabase
+      .from('tests')
+      .select('*')
+      .eq('teacher_id', user.id)
+      .order('created_at', { ascending: false });
 
-    const results = JSON.parse(localStorage.getItem("testResults") || "[]");
-    const teacherResults = results.filter((r: any) => 
-      teacherTests.some((t: any) => t.testCode === r.testCode)
-    );
-    setAllResults(teacherResults);
-  }, [navigate]);
+    if (error) {
+      console.error('Error fetching tests:', error);
+      toast({ title: "Error", description: "Failed to load tests", variant: "destructive" });
+    } else {
+      setTests(data || []);
+    }
+  };
 
-  const handleLogout = () => {
-    localStorage.removeItem("currentTeacher");
-    localStorage.removeItem("userRole");
+  const fetchResults = async () => {
+    if (!user) return;
+    
+    const { data, error } = await supabase
+      .from('test_results')
+      .select(`
+        *,
+        tests!inner(teacher_id)
+      `)
+      .eq('tests.teacher_id', user.id);
+
+    if (error) {
+      console.error('Error fetching results:', error);
+    } else {
+      setAllResults(data || []);
+    }
+  };
+
+  const fetchStudents = async () => {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('*');
+    
+    if (!error && data) {
+      setStudents(data);
+    }
+  };
+
+  const handleLogout = async () => {
+    await signOut();
     toast({ title: "Logged out", description: "See you next time!" });
-    navigate('/');
-  };
-
-  const generateTestCode = (subject: string) => {
-    const prefix = subject === 'English' ? 'E' : subject === 'Science' ? 'S' : 'M';
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    let code = prefix;
-    for (let i = 0; i < 5; i++) {
-      code += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return code;
-  };
-
-  const handleCreateTest = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!testTitle || !testSubject) {
-      toast({ title: "Error", description: "Please fill in all fields", variant: "destructive" });
-      return;
-    }
-
-    const testCode = generateTestCode(testSubject);
-    const newTest = {
-      id: crypto.randomUUID(),
-      testCode,
-      subject: testSubject,
-      title: testTitle,
-      duration_minutes: parseInt(testDuration),
-      teacherId: teacher.teacherId,
-      teacherName: teacher.fullName,
-      createdAt: new Date().toISOString()
-    };
-
-    const allTests = JSON.parse(localStorage.getItem("tests") || "[]");
-    allTests.push(newTest);
-    localStorage.setItem("tests", JSON.stringify(allTests));
-
-    toast({ 
-      title: "Test Created!", 
-      description: `Test code: ${testCode}`,
-      duration: 5000
-    });
-
-    setTestTitle("");
-    setTestSubject("");
-    setTestDuration("60");
-    setTests([...tests, newTest]);
   };
 
   const copyTestCode = (code: string) => {
@@ -107,22 +91,22 @@ const NewTeacherDashboard = () => {
     toast({ title: "Copied!", description: "Test code copied to clipboard" });
   };
 
-  const handleDeleteTest = (testId: string) => {
+  const handleDeleteTest = async (testId: string) => {
     if (!window.confirm('Are you sure you want to delete this test? This action cannot be undone.')) {
       return;
     }
 
-    const allTests = JSON.parse(localStorage.getItem("tests") || "[]");
-    const filtered = allTests.filter((t: any) => t.id !== testId);
-    localStorage.setItem("tests", JSON.stringify(filtered));
+    const { error } = await supabase
+      .from('tests')
+      .delete()
+      .eq('id', testId);
 
-    // Also delete associated questions
-    const allQuestions = JSON.parse(localStorage.getItem("questions") || "[]");
-    const filteredQuestions = allQuestions.filter((q: any) => q.test_id !== testId);
-    localStorage.setItem("questions", JSON.stringify(filteredQuestions));
-
-    setTests(filtered.filter((t: any) => t.teacherId === teacher.teacherId));
-    toast({ title: "Test Deleted", description: "Test and all its questions have been deleted" });
+    if (error) {
+      toast({ title: "Error", description: "Failed to delete test", variant: "destructive" });
+    } else {
+      setTests(tests.filter(t => t.id !== testId));
+      toast({ title: "Test Deleted", description: "Test and all its questions have been deleted" });
+    }
   };
 
   const handleEditTest = (test: any) => {
@@ -134,20 +118,20 @@ const NewTeacherDashboard = () => {
     });
   };
 
-  const handleSaveEdit = (testId: string) => {
-    const allTests = JSON.parse(localStorage.getItem("tests") || "[]");
-    const testIndex = allTests.findIndex((t: any) => t.id === testId);
-    
-    if (testIndex !== -1) {
-      allTests[testIndex] = {
-        ...allTests[testIndex],
+  const handleSaveEdit = async (testId: string) => {
+    const { error } = await supabase
+      .from('tests')
+      .update({
         title: editForm.title,
         subject: editForm.subject,
         duration_minutes: editForm.duration_minutes
-      };
-      localStorage.setItem("tests", JSON.stringify(allTests));
-      
-      setTests(allTests.filter((t: any) => t.teacherId === teacher.teacherId));
+      })
+      .eq('id', testId);
+
+    if (error) {
+      toast({ title: "Error", description: "Failed to update test", variant: "destructive" });
+    } else {
+      setTests(tests.map(t => t.id === testId ? { ...t, ...editForm } : t));
       toast({ title: "Test Updated", description: "Test details have been saved" });
     }
     
@@ -158,19 +142,26 @@ const NewTeacherDashboard = () => {
     setEditingTestId(null);
   };
 
-  if (!teacher) return null;
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="animate-pulse text-muted-foreground">Loading...</div>
+      </div>
+    );
+  }
+
+  if (!user) return null;
 
   // Analytics calculations
   const avgScore = allResults.length > 0
     ? (allResults.reduce((sum, r) => sum + (r.score || 0), 0) / allResults.length).toFixed(1)
     : 0;
 
-  const students = JSON.parse(localStorage.getItem("students") || "[]");
-  const studentCount = new Set(allResults.map(r => r.studentId)).size;
+  const studentCount = new Set(allResults.map(r => r.student_id)).size;
 
   const genderPerformance = Object.entries(
     allResults.reduce((acc: any, r) => {
-      const student = students.find((s: any) => s.studentId === r.studentId);
+      const student = students.find((s: any) => s.user_id === r.student_id);
       const gender = student?.gender || 'Unknown';
       if (!acc[gender]) acc[gender] = { total: 0, count: 0 };
       acc[gender].total += r.score || 0;
@@ -184,7 +175,7 @@ const NewTeacherDashboard = () => {
 
   const classPerformance = Object.entries(
     allResults.reduce((acc: any, r) => {
-      const student = students.find((s: any) => s.studentId === r.studentId);
+      const student = students.find((s: any) => s.user_id === r.student_id);
       const className = student ? `${student.grade}-${student.class}` : 'Unknown';
       if (!acc[className]) acc[className] = { total: 0, count: 0 };
       acc[className].total += r.score || 0;
@@ -197,7 +188,7 @@ const NewTeacherDashboard = () => {
   }));
 
   const performanceTrend = allResults
-    .sort((a, b) => new Date(a.completedAt).getTime() - new Date(b.completedAt).getTime())
+    .sort((a, b) => new Date(a.completed_at).getTime() - new Date(b.completed_at).getTime())
     .slice(-10)
     .map((r, i) => ({
       test: `T${i + 1}`,
@@ -206,7 +197,7 @@ const NewTeacherDashboard = () => {
 
   const difficultyDistribution = Object.entries(
     allResults.reduce((acc: any, r) => {
-      const diff = r.difficultyLevel || 'Unknown';
+      const diff = r.difficulty_level || 'Unknown';
       acc[diff] = (acc[diff] || 0) + 1;
       return acc;
     }, {})
@@ -220,11 +211,9 @@ const NewTeacherDashboard = () => {
       case "create":
         return (
           <CreateTestWizard
-            teacherId={teacher.teacherId}
+            teacherId={user.id}
             onComplete={(testCode) => {
-              // Reload tests from localStorage (CreateTestWizard already saved it)
-              const allTests = JSON.parse(localStorage.getItem("tests") || "[]");
-              setTests(allTests.filter((t: any) => t.teacherId === teacher.teacherId));
+              fetchTests();
               setActiveSection("tests");
             }}
             onCancel={() => setActiveSection("home")}
@@ -232,7 +221,6 @@ const NewTeacherDashboard = () => {
         );
 
       case "tests":
-        // If editing questions for a test, show the TestEditor
         if (editingQuestionsTestId) {
           return (
             <TestEditor 
@@ -253,7 +241,6 @@ const NewTeacherDashboard = () => {
                 tests.map((test, idx) => (
                   <div key={idx} className="p-5 bg-muted/30 rounded-2xl hover:bg-muted/50 transition-colors">
                     {editingTestId === test.id ? (
-                      // Edit Mode
                       <div className="space-y-4">
                         <div className="space-y-2">
                           <Label className="text-xs">Test Title</Label>
@@ -313,23 +300,22 @@ const NewTeacherDashboard = () => {
                         </div>
                       </div>
                     ) : (
-                      // View Mode
                       <div className="flex justify-between items-center">
                         <div className="flex-1">
                           <p className="font-semibold text-foreground">{test.title}</p>
                           <p className="text-sm text-muted-foreground mt-1">
-                            {test.subject} • {test.duration_minutes || test.durationMinutes || 60} min • {new Date(test.createdAt).toLocaleDateString()}
+                            {test.subject} • {test.duration_minutes || 60} min • {new Date(test.created_at).toLocaleDateString()}
                           </p>
                         </div>
                         <div className="flex items-center gap-3">
                           <div className="text-right mr-2">
-                            <p className="text-xl font-bold text-primary font-mono">{test.testCode}</p>
+                            <p className="text-xl font-bold text-primary font-mono">{test.test_code}</p>
                             <p className="text-xs text-muted-foreground">Test Code</p>
                           </div>
                           <Button
                             variant="outline"
                             size="icon"
-                            onClick={() => copyTestCode(test.testCode)}
+                            onClick={() => copyTestCode(test.test_code)}
                             className="rounded-xl"
                             title="Copy test code"
                           >
@@ -373,28 +359,14 @@ const NewTeacherDashboard = () => {
         );
 
       case "analytics":
-        // Group results by test for test-wise analytics
         const testWiseAnalytics = tests.map(test => {
-          const testResults = allResults.filter(r => r.testCode === test.testCode);
+          const testResults = allResults.filter(r => r.test_id === test.id);
           const avgTestScore = testResults.length > 0 
             ? testResults.reduce((sum, r) => sum + (r.score || 0), 0) / testResults.length 
             : 0;
           const avgTimeSpent = testResults.length > 0 
-            ? testResults.reduce((sum, r) => sum + (r.timeSpent || 0), 0) / testResults.length 
+            ? testResults.reduce((sum, r) => sum + (r.time_spent || 0), 0) / testResults.length 
             : 0;
-          
-          // Per-question timing (if available)
-          const questionStats: Record<number, { totalTime: number; count: number; correct: number }> = {};
-          testResults.forEach(result => {
-            if (result.questionTiming) {
-              Object.entries(result.questionTiming).forEach(([qIdx, time]) => {
-                const idx = parseInt(qIdx);
-                if (!questionStats[idx]) questionStats[idx] = { totalTime: 0, count: 0, correct: 0 };
-                questionStats[idx].totalTime += time as number;
-                questionStats[idx].count += 1;
-              });
-            }
-          });
           
           return {
             ...test,
@@ -402,13 +374,11 @@ const NewTeacherDashboard = () => {
             avgScore: Math.round(avgTestScore * 10) / 10,
             avgTimeMinutes: Math.round(avgTimeSpent / 60),
             results: testResults,
-            questionStats
           };
         });
 
         return (
           <div className="space-y-6 animate-fade-in">
-            {/* Test Selector for detailed view */}
             <Card className="cloud-bubble p-6">
               <h3 className="text-xl font-semibold mb-4">Test-wise Analytics</h3>
               <div className="space-y-4">
@@ -420,76 +390,81 @@ const NewTeacherDashboard = () => {
                       <div className="flex justify-between items-start mb-4">
                         <div>
                           <h4 className="font-semibold text-lg">{test.title}</h4>
-                          <p className="text-sm text-muted-foreground">{test.subject} • Code: {test.testCode}</p>
+                          <p className="text-sm text-muted-foreground">{test.subject} • Code: {test.test_code}</p>
                         </div>
                         <div className="text-right">
                           <p className="text-2xl font-bold text-primary">{test.avgScore}%</p>
-                          <p className="text-xs text-muted-foreground">avg score</p>
+                          <p className="text-xs text-muted-foreground">Avg Score</p>
                         </div>
                       </div>
-                      
-                      <div className="grid grid-cols-3 gap-4 mb-4">
-                        <div className="p-3 bg-background/50 rounded-xl text-center">
-                          <Users className="h-5 w-5 mx-auto mb-1 text-primary" />
-                          <p className="text-lg font-bold">{test.attemptCount}</p>
+                      <div className="grid grid-cols-3 gap-4 mt-4">
+                        <div className="p-3 bg-background/50 rounded-xl">
                           <p className="text-xs text-muted-foreground">Attempts</p>
+                          <p className="text-lg font-semibold">{test.attemptCount}</p>
                         </div>
-                        <div className="p-3 bg-background/50 rounded-xl text-center">
-                          <Clock className="h-5 w-5 mx-auto mb-1 text-secondary" />
-                          <p className="text-lg font-bold">{test.avgTimeMinutes}m</p>
+                        <div className="p-3 bg-background/50 rounded-xl">
                           <p className="text-xs text-muted-foreground">Avg Time</p>
+                          <p className="text-lg font-semibold">{test.avgTimeMinutes} min</p>
                         </div>
-                        <div className="p-3 bg-background/50 rounded-xl text-center">
-                          <TrendingUp className="h-5 w-5 mx-auto mb-1 text-accent-foreground" />
-                          <p className="text-lg font-bold">
-                            {test.results.length > 0 ? Math.max(...test.results.map(r => r.score || 0)) : 0}%
-                          </p>
-                          <p className="text-xs text-muted-foreground">Top Score</p>
+                        <div className="p-3 bg-background/50 rounded-xl">
+                          <p className="text-xs text-muted-foreground">Duration</p>
+                          <p className="text-lg font-semibold">{test.duration_minutes} min</p>
                         </div>
                       </div>
-
-                      {/* Score distribution for this test */}
-                      {test.results.length > 0 && (
-                        <div className="mt-4">
-                          <p className="text-sm font-medium mb-2">Score Distribution</p>
-                          <ResponsiveContainer width="100%" height={120}>
-                            <BarChart data={test.results.slice(0, 10)}>
-                              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                              <XAxis dataKey="studentId" hide />
-                              <YAxis domain={[0, 100]} hide />
-                              <Tooltip 
-                                contentStyle={{ 
-                                  backgroundColor: 'hsl(var(--card))', 
-                                  border: '1px solid hsl(var(--border))',
-                                  borderRadius: '0.5rem',
-                                  fontSize: '12px'
-                                }}
-                                formatter={(value) => [`${value}%`, 'Score']}
-                              />
-                              <Bar dataKey="score" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
-                            </BarChart>
-                          </ResponsiveContainer>
-                        </div>
-                      )}
                     </div>
                   ))
                 )}
               </div>
             </Card>
 
-            {/* Overall Stats */}
             <div className="grid md:grid-cols-2 gap-6">
               <Card className="cloud-bubble p-6">
-                <h3 className="text-lg font-semibold mb-4">Gender Performance</h3>
+                <h3 className="text-lg font-semibold mb-4">Performance by Gender</h3>
                 {genderPerformance.length > 0 ? (
                   <ResponsiveContainer width="100%" height={220}>
                     <BarChart data={genderPerformance}>
                       <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
                       <XAxis dataKey="gender" stroke="hsl(var(--muted-foreground))" />
                       <YAxis domain={[0, 100]} stroke="hsl(var(--muted-foreground))" />
-                      <Tooltip />
+                      <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '1rem' }} />
                       <Bar dataKey="avgScore" fill="hsl(var(--primary))" radius={[8, 8, 0, 0]} />
                     </BarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <p className="text-muted-foreground text-center py-8">No data yet</p>
+                )}
+              </Card>
+
+              <Card className="cloud-bubble p-6">
+                <h3 className="text-lg font-semibold mb-4">Performance by Class</h3>
+                {classPerformance.length > 0 ? (
+                  <ResponsiveContainer width="100%" height={220}>
+                    <BarChart data={classPerformance}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                      <XAxis dataKey="name" stroke="hsl(var(--muted-foreground))" />
+                      <YAxis domain={[0, 100]} stroke="hsl(var(--muted-foreground))" />
+                      <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '1rem' }} />
+                      <Bar dataKey="avgScore" fill="hsl(var(--secondary))" radius={[8, 8, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <p className="text-muted-foreground text-center py-8">No data yet</p>
+                )}
+              </Card>
+            </div>
+
+            <div className="grid md:grid-cols-2 gap-6">
+              <Card className="cloud-bubble p-6">
+                <h3 className="text-lg font-semibold mb-4">Score Trend</h3>
+                {performanceTrend.length > 0 ? (
+                  <ResponsiveContainer width="100%" height={220}>
+                    <LineChart data={performanceTrend}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                      <XAxis dataKey="test" stroke="hsl(var(--muted-foreground))" />
+                      <YAxis domain={[0, 100]} stroke="hsl(var(--muted-foreground))" />
+                      <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '1rem' }} />
+                      <Line type="monotone" dataKey="score" stroke="hsl(var(--primary))" strokeWidth={3} dot={{ fill: 'hsl(var(--primary))' }} />
+                    </LineChart>
                   </ResponsiveContainer>
                 ) : (
                   <p className="text-muted-foreground text-center py-8">No data yet</p>
@@ -524,26 +499,30 @@ const NewTeacherDashboard = () => {
             <p className="text-muted-foreground text-sm mb-6">Individual student performance</p>
             <div className="space-y-4">
               {allResults.length === 0 ? (
-                <p className="text-muted-foreground text-center py-12">No student results yet. Share your test codes with students!</p>
+                <p className="text-muted-foreground text-center py-12">No student results yet</p>
               ) : (
                 allResults.map((result, idx) => {
-                  const student = students.find((s: any) => s.studentId === result.studentId);
+                  const student = students.find(s => s.user_id === result.student_id);
+                  const test = tests.find(t => t.id === result.test_id);
                   return (
-                    <div key={idx} className="flex justify-between items-center p-5 bg-muted/30 rounded-2xl hover:bg-muted/50 transition-colors">
-                      <div>
-                        <p className="font-semibold text-foreground">{student?.fullName || 'Unknown Student'}</p>
-                        <p className="text-sm text-muted-foreground mt-1">
-                          ID: {result.studentId} • Grade {student?.grade}-{student?.class} • {student?.gender}
-                        </p>
-                        <p className="text-xs text-muted-foreground mt-1">
-                          Test: {result.testTitle} • {result.difficultyLevel} • {new Date(result.completedAt).toLocaleDateString()}
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-3xl font-bold text-primary">{result.score}%</p>
-                        <p className="text-xs text-muted-foreground">
-                          {Math.floor(result.timeSpent / 60)} min
-                        </p>
+                    <div key={idx} className="p-5 bg-muted/30 rounded-2xl hover:bg-muted/50 transition-colors">
+                      <div className="flex justify-between items-center">
+                        <div>
+                          <p className="font-semibold text-foreground">{student?.full_name || 'Unknown Student'}</p>
+                          <p className="text-sm text-muted-foreground mt-1">
+                            {test?.title || 'Unknown Test'} • {result.difficulty_level || 'N/A'} level
+                          </p>
+                          <div className="flex gap-4 mt-2 text-xs">
+                            <span className="text-success">✓ {result.correct_answers || 0} correct</span>
+                            <span className="text-destructive">✗ {result.wrong_answers || 0} wrong</span>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-3xl font-bold text-primary">{result.score}%</p>
+                          <p className="text-xs text-muted-foreground">
+                            {Math.floor((result.time_spent || 0) / 60)} min
+                          </p>
+                        </div>
                       </div>
                     </div>
                   );
@@ -575,7 +554,7 @@ const NewTeacherDashboard = () => {
                   activeSection === "analytics" ? "Analytics" : "Students"
                 )}
               </h1>
-              <p className="text-muted-foreground">Welcome, {teacher.fullName}!</p>
+              <p className="text-muted-foreground">Welcome, {profile?.full_name || 'Teacher'}!</p>
             </div>
           </div>
           <Button variant="outline" onClick={handleLogout} className="rounded-xl">
@@ -601,7 +580,7 @@ const NewTeacherDashboard = () => {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
               <Card className="cloud-bubble p-5">
                 <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
+                  <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
                     <Upload className="h-5 w-5 text-primary" />
                   </div>
                   <div>
@@ -610,10 +589,9 @@ const NewTeacherDashboard = () => {
                   </div>
                 </div>
               </Card>
-
               <Card className="cloud-bubble p-5">
                 <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-full bg-secondary/10 flex items-center justify-center">
+                  <div className="w-10 h-10 rounded-full bg-secondary/10 flex items-center justify-center flex-shrink-0">
                     <Users className="h-5 w-5 text-secondary" />
                   </div>
                   <div>
@@ -622,11 +600,10 @@ const NewTeacherDashboard = () => {
                   </div>
                 </div>
               </Card>
-
               <Card className="cloud-bubble p-5">
                 <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-full bg-accent flex items-center justify-center">
-                    <TrendingUp className="h-5 w-5 text-accent-foreground" />
+                  <div className="w-10 h-10 rounded-full bg-accent/10 flex items-center justify-center flex-shrink-0">
+                    <TrendingUp className="h-5 w-5 text-accent" />
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Avg Score</p>
@@ -634,14 +611,13 @@ const NewTeacherDashboard = () => {
                   </div>
                 </div>
               </Card>
-
               <Card className="cloud-bubble p-5">
                 <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
-                    <BarChart3 className="h-5 w-5 text-primary" />
+                  <div className="w-10 h-10 rounded-full bg-destructive/10 flex items-center justify-center flex-shrink-0">
+                    <BarChart3 className="h-5 w-5 text-destructive" />
                   </div>
                   <div>
-                    <p className="text-xs text-muted-foreground">Tests Taken</p>
+                    <p className="text-xs text-muted-foreground">Total Tests</p>
                     <p className="text-2xl font-bold">{allResults.length}</p>
                   </div>
                 </div>
@@ -649,47 +625,42 @@ const NewTeacherDashboard = () => {
             </div>
 
             {/* Navigation Bubbles */}
-            <h2 className="text-xl font-semibold mb-6">Quick Access</h2>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-              <button onClick={() => setActiveSection("create")} className="nav-bubble">
-                <div className="nav-bubble-icon">
-                  <PlusCircle className="h-8 w-8 text-primary" />
-                </div>
-                <div>
-                  <h3 className="text-lg font-semibold text-foreground">Create Test</h3>
-                  <p className="text-sm text-muted-foreground mt-1">Generate new test</p>
-                </div>
-              </button>
+              <div
+                onClick={() => setActiveSection("create")}
+                className="nav-bubble group cursor-pointer"
+              >
+                <PlusCircle className="h-10 w-10 mb-3 text-primary group-hover:scale-110 transition-transform" />
+                <p className="font-semibold">Create Test</p>
+                <p className="text-xs text-muted-foreground mt-1">Build a new assessment</p>
+              </div>
 
-              <button onClick={() => setActiveSection("tests")} className="nav-bubble">
-                <div className="nav-bubble-icon">
-                  <FolderOpen className="h-8 w-8 text-primary" />
-                </div>
-                <div>
-                  <h3 className="text-lg font-semibold text-foreground">My Tests</h3>
-                  <p className="text-sm text-muted-foreground mt-1">View & manage</p>
-                </div>
-              </button>
+              <div
+                onClick={() => setActiveSection("tests")}
+                className="nav-bubble group cursor-pointer"
+              >
+                <FolderOpen className="h-10 w-10 mb-3 text-secondary group-hover:scale-110 transition-transform" />
+                <p className="font-semibold">My Tests</p>
+                <p className="text-xs text-muted-foreground mt-1">View and manage tests</p>
+              </div>
 
-              <button onClick={() => setActiveSection("analytics")} className="nav-bubble">
-                <div className="nav-bubble-icon">
-                  <ChartLine className="h-8 w-8 text-primary" />
-                </div>
-                <div>
-                  <h3 className="text-lg font-semibold text-foreground">Analytics</h3>
-                  <p className="text-sm text-muted-foreground mt-1">Performance data</p>
-                </div>
-              </button>
+              <div
+                onClick={() => setActiveSection("analytics")}
+                className="nav-bubble group cursor-pointer"
+              >
+                <ChartLine className="h-10 w-10 mb-3 text-accent group-hover:scale-110 transition-transform" />
+                <p className="font-semibold">Analytics</p>
+                <p className="text-xs text-muted-foreground mt-1">Performance insights</p>
+              </div>
 
-              <button onClick={() => setActiveSection("students")} className="nav-bubble">
-                <div className="nav-bubble-icon">
-                  <Users className="h-8 w-8 text-primary" />
-                </div>
-                <div>
-                  <h3 className="text-lg font-semibold text-foreground">Students</h3>
-                  <p className="text-sm text-muted-foreground mt-1">Individual results</p>
-                </div>
-              </button>
+              <div
+                onClick={() => setActiveSection("students")}
+                className="nav-bubble group cursor-pointer"
+              >
+                <Users className="h-10 w-10 mb-3 text-primary group-hover:scale-110 transition-transform" />
+                <p className="font-semibold">Students</p>
+                <p className="text-xs text-muted-foreground mt-1">View student results</p>
+              </div>
             </div>
           </>
         ) : (

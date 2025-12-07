@@ -5,14 +5,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { GraduationCap, UserCircle, ShieldCheck, ArrowLeft, Eye, EyeOff } from "lucide-react";
+import { GraduationCap, UserCircle, ShieldCheck, ArrowLeft, Eye, EyeOff, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
 import sckoolLogo from "@/assets/sckool-logo.jpeg";
 
-// Admin ID verification moved to server-side (edge function) for security
-
-// Moved OUTSIDE the component to prevent re-creation on every render
 const PasswordInputField = ({ 
   id, 
   value, 
@@ -51,194 +49,169 @@ const LoginPage = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { toast } = useToast();
+  const { signUp, signIn } = useAuth();
   
   const role = searchParams.get("role") || "student";
   const [isSignUp, setIsSignUp] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [showAdminId, setShowAdminId] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   
   const [studentForm, setStudentForm] = useState({
-    studentId: "", password: "", fullName: "", grade: "", class: "", gender: "", age: ""
+    email: "", password: "", fullName: "", grade: "", class: "", gender: "", age: ""
   });
 
   const [teacherForm, setTeacherForm] = useState({
-    adminId: "", emailId: "", password: "", fullName: "", subject: ""
+    adminId: "", email: "", password: "", fullName: "", subject: ""
   });
 
   // Validation helpers
-  const validateId = (id: string) => id.trim().length >= 3 && id.trim().length <= 50;
-  const validatePassword = (pass: string) => pass.length >= 4;
+  const validatePassword = (pass: string) => pass.length >= 6;
   const validateName = (name: string) => name.trim().length >= 2 && name.trim().length <= 50;
   const validateEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 
-  const handleStudentAuth = (e: React.FormEvent) => {
+  const handleStudentAuth = async (e: React.FormEvent) => {
     e.preventDefault();
+    setIsLoading(true);
     
-    if (isSignUp) {
-      if (!studentForm.studentId || !studentForm.password || !studentForm.fullName || 
-          !studentForm.grade || !studentForm.class || !studentForm.gender || !studentForm.age) {
-        toast({ title: "Missing Information", description: "Please fill in all fields", variant: "destructive" });
-        return;
-      }
+    try {
+      if (isSignUp) {
+        if (!studentForm.email || !studentForm.password || !studentForm.fullName || 
+            !studentForm.grade || !studentForm.class || !studentForm.gender || !studentForm.age) {
+          toast({ title: "Missing Information", description: "Please fill in all fields", variant: "destructive" });
+          return;
+        }
 
-      if (!validateId(studentForm.studentId)) {
-        toast({ title: "Invalid Student ID", description: "Student ID must be 3-50 characters", variant: "destructive" });
-        return;
-      }
+        if (!validateEmail(studentForm.email)) {
+          toast({ title: "Invalid Email", description: "Please enter a valid email address", variant: "destructive" });
+          return;
+        }
 
-      if (!validatePassword(studentForm.password)) {
-        toast({ title: "Weak Password", description: "Password must be at least 4 characters", variant: "destructive" });
-        return;
-      }
+        if (!validatePassword(studentForm.password)) {
+          toast({ title: "Weak Password", description: "Password must be at least 6 characters", variant: "destructive" });
+          return;
+        }
 
-      if (!validateName(studentForm.fullName)) {
-        toast({ title: "Invalid Name", description: "Name must be 2-50 characters", variant: "destructive" });
-        return;
+        if (!validateName(studentForm.fullName)) {
+          toast({ title: "Invalid Name", description: "Name must be 2-50 characters", variant: "destructive" });
+          return;
+        }
+
+        const { error } = await signUp(studentForm.email, studentForm.password, {
+          fullName: studentForm.fullName.trim(),
+          grade: studentForm.grade.trim(),
+          class: studentForm.class.trim(),
+          gender: studentForm.gender,
+          age: studentForm.age,
+          role: 'student'
+        });
+
+        if (error) {
+          if (error.message?.includes('already registered')) {
+            toast({ title: "Account Exists", description: "This email is already registered. Please login.", variant: "destructive" });
+            setIsSignUp(false);
+          } else {
+            toast({ title: "Error", description: error.message, variant: "destructive" });
+          }
+          return;
+        }
+
+        toast({ title: "Success!", description: "Account created! Redirecting..." });
+        navigate("/student/dashboard");
+      } else {
+        if (!studentForm.email || !studentForm.password) {
+          toast({ title: "Missing Information", description: "Please enter email and password", variant: "destructive" });
+          return;
+        }
+
+        const { error } = await signIn(studentForm.email, studentForm.password);
+
+        if (error) {
+          toast({ title: "Error", description: "Invalid email or password", variant: "destructive" });
+          return;
+        }
+
+        toast({ title: "Welcome!", description: "Logged in successfully" });
+        navigate("/student/dashboard");
       }
-      
-      const students = JSON.parse(localStorage.getItem("students") || "[]");
-      if (students.find((s: any) => s.studentId === studentForm.studentId.trim())) {
-        toast({ title: "Error", description: "Student ID already exists", variant: "destructive" });
-        return;
-      }
-      
-      // Hash password before storing
-      const hashedPassword = btoa(studentForm.password);
-      
-      const sanitizedStudent = {
-        studentId: studentForm.studentId.trim(),
-        fullName: studentForm.fullName.trim(),
-        grade: studentForm.grade.trim(),
-        class: studentForm.class.trim(),
-        age: studentForm.age.trim(),
-        gender: studentForm.gender,
-        password: hashedPassword
-      };
-      
-      students.push(sanitizedStudent);
-      localStorage.setItem("students", JSON.stringify(students));
-      toast({ title: "Success!", description: "Account created! Please login." });
-      setIsSignUp(false);
-      setStudentForm({ ...studentForm, password: "" });
-    } else {
-      if (!studentForm.studentId || !studentForm.password) {
-        toast({ title: "Missing Information", description: "Please enter Student ID and password", variant: "destructive" });
-        return;
-      }
-      
-      const students = JSON.parse(localStorage.getItem("students") || "[]");
-      const hashedPassword = btoa(studentForm.password);
-      const student = students.find((s: any) => 
-        s.studentId === studentForm.studentId.trim() && s.password === hashedPassword
-      );
-      
-      if (!student) {
-        toast({ title: "Error", description: "Invalid Student ID or password", variant: "destructive" });
-        return;
-      }
-      
-      // Store only non-sensitive data in session
-      const sessionData = {
-        studentId: student.studentId,
-        fullName: student.fullName,
-        grade: student.grade,
-        class: student.class,
-        age: student.age,
-        gender: student.gender
-      };
-      localStorage.setItem("currentStudent", JSON.stringify(sessionData));
-      localStorage.setItem("userRole", "student");
-      toast({ title: "Welcome!", description: `Logged in as ${student.fullName}` });
-      navigate("/student/dashboard");
+    } finally {
+      setIsLoading(false);
     }
   };
 
   const handleTeacherAuth = async (e: React.FormEvent) => {
     e.preventDefault();
+    setIsLoading(true);
     
-    if (isSignUp) {
-      if (!teacherForm.adminId || !teacherForm.emailId || !teacherForm.password || 
-          !teacherForm.fullName || !teacherForm.subject) {
-        toast({ title: "Missing Information", description: "Please fill in all fields", variant: "destructive" });
-        return;
-      }
-      
-      // Verify admin ID server-side
-      const { data: verifyData, error: verifyError } = await supabase.functions.invoke('verify-admin-id', {
-        body: { adminId: teacherForm.adminId }
-      });
-      
-      if (verifyError || !verifyData?.valid) {
-        toast({ title: "Invalid Admin ID", description: "Please contact administrator for valid Admin ID", variant: "destructive" });
-        return;
-      }
+    try {
+      if (isSignUp) {
+        if (!teacherForm.adminId || !teacherForm.email || !teacherForm.password || 
+            !teacherForm.fullName || !teacherForm.subject) {
+          toast({ title: "Missing Information", description: "Please fill in all fields", variant: "destructive" });
+          return;
+        }
+        
+        // Verify admin ID server-side
+        const { data: verifyData, error: verifyError } = await supabase.functions.invoke('verify-admin-id', {
+          body: { adminId: teacherForm.adminId }
+        });
+        
+        if (verifyError || !verifyData?.valid) {
+          toast({ title: "Invalid Admin ID", description: "Please contact administrator for valid Admin ID", variant: "destructive" });
+          return;
+        }
 
-      if (!validateEmail(teacherForm.emailId)) {
-        toast({ title: "Invalid Email", description: "Please enter a valid email address", variant: "destructive" });
-        return;
-      }
+        if (!validateEmail(teacherForm.email)) {
+          toast({ title: "Invalid Email", description: "Please enter a valid email address", variant: "destructive" });
+          return;
+        }
 
-      if (!validatePassword(teacherForm.password)) {
-        toast({ title: "Weak Password", description: "Password must be at least 4 characters", variant: "destructive" });
-        return;
-      }
+        if (!validatePassword(teacherForm.password)) {
+          toast({ title: "Weak Password", description: "Password must be at least 6 characters", variant: "destructive" });
+          return;
+        }
 
-      if (!validateName(teacherForm.fullName)) {
-        toast({ title: "Invalid Name", description: "Name must be 2-50 characters", variant: "destructive" });
-        return;
+        if (!validateName(teacherForm.fullName)) {
+          toast({ title: "Invalid Name", description: "Name must be 2-50 characters", variant: "destructive" });
+          return;
+        }
+
+        const { error } = await signUp(teacherForm.email, teacherForm.password, {
+          fullName: teacherForm.fullName.trim(),
+          subject: teacherForm.subject,
+          role: 'teacher'
+        });
+
+        if (error) {
+          if (error.message?.includes('already registered')) {
+            toast({ title: "Account Exists", description: "This email is already registered. Please login.", variant: "destructive" });
+            setIsSignUp(false);
+          } else {
+            toast({ title: "Error", description: error.message, variant: "destructive" });
+          }
+          return;
+        }
+
+        toast({ title: "Success!", description: "Account created! Redirecting..." });
+        navigate("/teacher/dashboard");
+      } else {
+        if (!teacherForm.email || !teacherForm.password) {
+          toast({ title: "Missing Information", description: "Please enter Email and password", variant: "destructive" });
+          return;
+        }
+
+        const { error } = await signIn(teacherForm.email, teacherForm.password);
+
+        if (error) {
+          toast({ title: "Error", description: "Invalid Email or password", variant: "destructive" });
+          return;
+        }
+
+        toast({ title: "Welcome!", description: "Logged in successfully" });
+        navigate("/teacher/dashboard");
       }
-      
-      const teachers = JSON.parse(localStorage.getItem("teachers") || "[]");
-      if (teachers.find((t: any) => t.emailId === teacherForm.emailId.trim().toLowerCase())) {
-        toast({ title: "Error", description: "Email already registered", variant: "destructive" });
-        return;
-      }
-      
-      // Hash password before storing (simple hash for demo - in production use bcrypt)
-      const hashedPassword = btoa(teacherForm.password);
-      
-      const newTeacher = {
-        teacherId: teacherForm.emailId.trim().toLowerCase(),
-        emailId: teacherForm.emailId.trim().toLowerCase(),
-        password: hashedPassword,
-        fullName: teacherForm.fullName.trim(),
-        subject: teacherForm.subject
-      };
-      
-      teachers.push(newTeacher);
-      localStorage.setItem("teachers", JSON.stringify(teachers));
-      toast({ title: "Success!", description: "Account created! Please login with your email." });
-      setIsSignUp(false);
-      setTeacherForm({ adminId: "", emailId: "", password: "", fullName: "", subject: "" });
-    } else {
-      if (!teacherForm.emailId || !teacherForm.password) {
-        toast({ title: "Missing Information", description: "Please enter Email and password", variant: "destructive" });
-        return;
-      }
-      
-      const teachers = JSON.parse(localStorage.getItem("teachers") || "[]");
-      const hashedPassword = btoa(teacherForm.password);
-      const teacher = teachers.find((t: any) => 
-        (t.emailId === teacherForm.emailId.trim().toLowerCase() || t.teacherId === teacherForm.emailId.trim().toLowerCase()) 
-        && t.password === hashedPassword
-      );
-      
-      if (!teacher) {
-        toast({ title: "Error", description: "Invalid Email or password", variant: "destructive" });
-        return;
-      }
-      
-      // Store only non-sensitive data in session
-      const sessionData = {
-        teacherId: teacher.teacherId,
-        emailId: teacher.emailId,
-        fullName: teacher.fullName,
-        subject: teacher.subject
-      };
-      localStorage.setItem("currentTeacher", JSON.stringify(sessionData));
-      localStorage.setItem("userRole", "teacher");
-      toast({ title: "Welcome!", description: `Logged in as ${teacher.fullName}` });
-      navigate("/teacher/dashboard");
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -281,6 +254,7 @@ const LoginPage = () => {
             variant={isSignUp ? "default" : "outline"} 
             onClick={() => setIsSignUp(true)}
             className="flex-1 rounded-xl"
+            disabled={isLoading}
           >
             Sign Up
           </Button>
@@ -288,6 +262,7 @@ const LoginPage = () => {
             variant={!isSignUp ? "default" : "outline"} 
             onClick={() => setIsSignUp(false)}
             className="flex-1 rounded-xl"
+            disabled={isLoading}
           >
             Login
           </Button>
@@ -297,14 +272,15 @@ const LoginPage = () => {
         {role === "student" && (
           <form onSubmit={handleStudentAuth} className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="student-id">Student ID</Label>
+              <Label htmlFor="student-email">Email</Label>
               <Input 
-                id="student-id" 
-                placeholder="Enter student ID" 
-                value={studentForm.studentId}
-                onChange={(e) => setStudentForm(prev => ({...prev, studentId: e.target.value}))} 
+                id="student-email" 
+                type="email"
+                placeholder="Enter your email" 
+                value={studentForm.email}
+                onChange={(e) => setStudentForm(prev => ({...prev, email: e.target.value}))} 
                 className="input-glassy" 
-                maxLength={50}
+                disabled={isLoading}
               />
             </div>
 
@@ -314,7 +290,7 @@ const LoginPage = () => {
                 id="student-password"
                 value={studentForm.password}
                 onChange={(e) => setStudentForm(prev => ({...prev, password: e.target.value}))}
-                placeholder="Enter password"
+                placeholder="Enter password (min 6 characters)"
                 showPassword={showPassword}
                 onToggleShow={() => setShowPassword(!showPassword)}
               />
@@ -331,6 +307,7 @@ const LoginPage = () => {
                     onChange={(e) => setStudentForm(prev => ({...prev, fullName: e.target.value}))} 
                     className="input-glassy" 
                     maxLength={50}
+                    disabled={isLoading}
                   />
                 </div>
 
@@ -343,6 +320,7 @@ const LoginPage = () => {
                       value={studentForm.grade}
                       onChange={(e) => setStudentForm(prev => ({...prev, grade: e.target.value}))} 
                       className="input-glassy" 
+                      disabled={isLoading}
                     />
                   </div>
 
@@ -354,6 +332,7 @@ const LoginPage = () => {
                       value={studentForm.class}
                       onChange={(e) => setStudentForm(prev => ({...prev, class: e.target.value}))} 
                       className="input-glassy" 
+                      disabled={isLoading}
                     />
                   </div>
                 </div>
@@ -364,6 +343,7 @@ const LoginPage = () => {
                     <Select 
                       value={studentForm.gender} 
                       onValueChange={(value) => setStudentForm(prev => ({...prev, gender: value}))}
+                      disabled={isLoading}
                     >
                       <SelectTrigger className="input-glassy">
                         <SelectValue placeholder="Select" />
@@ -386,14 +366,22 @@ const LoginPage = () => {
                       className="input-glassy"
                       min={5}
                       max={25}
+                      disabled={isLoading}
                     />
                   </div>
                 </div>
               </>
             )}
 
-            <Button type="submit" className="w-full nav-btn-next mt-6">
-              {isSignUp ? "Create Account" : "Login"}
+            <Button type="submit" className="w-full nav-btn-next mt-6" disabled={isLoading}>
+              {isLoading ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  {isSignUp ? "Creating Account..." : "Logging in..."}
+                </>
+              ) : (
+                isSignUp ? "Create Account" : "Login"
+              )}
             </Button>
           </form>
         )}
@@ -415,6 +403,7 @@ const LoginPage = () => {
                     value={teacherForm.adminId}
                     onChange={(e) => setTeacherForm(prev => ({...prev, adminId: e.target.value}))} 
                     className="input-glassy pr-12" 
+                    disabled={isLoading}
                   />
                   <button
                     type="button"
@@ -429,15 +418,16 @@ const LoginPage = () => {
             )}
 
             <div className="space-y-2">
-              <Label htmlFor="email-id">Email ID</Label>
+              <Label htmlFor="email-id">Email</Label>
               <Input 
                 id="email-id" 
                 type="email"
-                placeholder={isSignUp ? "Enter your email" : "Enter Email ID"} 
-                value={teacherForm.emailId}
-                onChange={(e) => setTeacherForm(prev => ({...prev, emailId: e.target.value}))} 
+                placeholder="Enter your email" 
+                value={teacherForm.email}
+                onChange={(e) => setTeacherForm(prev => ({...prev, email: e.target.value}))} 
                 className="input-glassy" 
                 maxLength={100}
+                disabled={isLoading}
               />
             </div>
 
@@ -447,7 +437,7 @@ const LoginPage = () => {
                 id="teacher-password"
                 value={teacherForm.password}
                 onChange={(e) => setTeacherForm(prev => ({...prev, password: e.target.value}))}
-                placeholder={isSignUp ? "Create your password" : "Enter your password"}
+                placeholder="Enter password (min 6 characters)"
                 showPassword={showPassword}
                 onToggleShow={() => setShowPassword(!showPassword)}
               />
@@ -456,14 +446,15 @@ const LoginPage = () => {
             {isSignUp && (
               <>
                 <div className="space-y-2">
-                  <Label htmlFor="teacher-name">Full Name</Label>
+                  <Label htmlFor="teacher-fullName">Full Name</Label>
                   <Input 
-                    id="teacher-name" 
-                    placeholder="Enter your full name" 
+                    id="teacher-fullName" 
+                    placeholder="Enter full name" 
                     value={teacherForm.fullName}
                     onChange={(e) => setTeacherForm(prev => ({...prev, fullName: e.target.value}))} 
                     className="input-glassy" 
                     maxLength={50}
+                    disabled={isLoading}
                   />
                 </div>
 
@@ -472,22 +463,30 @@ const LoginPage = () => {
                   <Select 
                     value={teacherForm.subject} 
                     onValueChange={(value) => setTeacherForm(prev => ({...prev, subject: value}))}
+                    disabled={isLoading}
                   >
                     <SelectTrigger className="input-glassy">
                       <SelectValue placeholder="Select subject" />
                     </SelectTrigger>
                     <SelectContent>
+                      <SelectItem value="English">English</SelectItem>
                       <SelectItem value="Science">Science</SelectItem>
                       <SelectItem value="Mathematics">Mathematics</SelectItem>
-                      <SelectItem value="English">English</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
               </>
             )}
 
-            <Button type="submit" className="w-full nav-btn-next mt-6">
-              {isSignUp ? "Create Account" : "Login"}
+            <Button type="submit" className="w-full nav-btn-next mt-6" disabled={isLoading}>
+              {isLoading ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  {isSignUp ? "Creating Account..." : "Logging in..."}
+                </>
+              ) : (
+                isSignUp ? "Create Account" : "Login"
+              )}
             </Button>
           </form>
         )}

@@ -1,25 +1,40 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-
 import { Clock, BookOpen, ChevronLeft, ChevronRight, Flag } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
-import { useQuestions, Question } from "@/hooks/useQuestions";
+import { useAuth } from "@/contexts/AuthContext";
+
+interface Question {
+  id: string;
+  test_id: string;
+  passage_id?: string | null;
+  question_type: string;
+  difficulty: string;
+  question_text: string;
+  options: string[] | null;
+  correct_answer: string;
+  marks: number;
+  order_index: number;
+  media_url?: string | null;
+  media_type?: string | null;
+  passage_text?: string | null;
+  passage_title?: string | null;
+}
 
 const AssessmentInterface = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { user } = useAuth();
   
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [selectedAnswer, setSelectedAnswer] = useState<string>("");
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [timeRemaining, setTimeRemaining] = useState(3600);
-  const [studentData, setStudentData] = useState<any>(null);
   const [testData, setTestData] = useState<any>(null);
   const [testId, setTestId] = useState<string>('');
   
-  // Adaptive difficulty states
   const [assignedLevel, setAssignedLevel] = useState<"easy" | "medium" | "hard" | null>(null);
   const [practiceComplete, setPracticeComplete] = useState(false);
   const [practiceScore, setPracticeScore] = useState(0);
@@ -28,7 +43,55 @@ const AssessmentInterface = () => {
   const [markedForReview, setMarkedForReview] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
 
-  const { fetchQuestions } = useQuestions(testId);
+  // Auto-save state to database
+  const saveSession = useCallback(async () => {
+    if (!user || !testId) return;
+    
+    try {
+      await supabase
+        .from('test_sessions')
+        .upsert({
+          test_id: testId,
+          student_id: user.id,
+          answers,
+          current_question: currentQuestionIndex,
+          time_remaining: timeRemaining,
+          marked_for_review: Array.from(markedForReview),
+          difficulty_level: assignedLevel,
+          practice_complete: practiceComplete,
+          last_saved_at: new Date().toISOString(),
+        }, {
+          onConflict: 'test_id,student_id'
+        });
+    } catch (error) {
+      console.error('Error saving session:', error);
+    }
+  }, [user, testId, answers, currentQuestionIndex, timeRemaining, markedForReview, assignedLevel, practiceComplete]);
+
+  // Save on visibility change and before unload
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        saveSession();
+      }
+    };
+
+    const handleBeforeUnload = () => {
+      saveSession();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    // Auto-save every 30 seconds
+    const autoSaveInterval = setInterval(saveSession, 30000);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      clearInterval(autoSaveInterval);
+    };
+  }, [saveSession]);
 
   useEffect(() => {
     initializeTest();
@@ -36,15 +99,12 @@ const AssessmentInterface = () => {
 
   useEffect(() => {
     if (testData && testId) {
-      loadPracticeQuestions();
+      loadQuestions();
     }
   }, [testData, testId]);
 
   useEffect(() => {
-    if (testData?.duration_minutes) {
-      const durationSeconds = testData.duration_minutes * 60;
-      setTimeRemaining(durationSeconds);
-
+    if (testData?.duration_minutes && timeRemaining > 0) {
       const timer = setInterval(() => {
         setTimeRemaining((prev) => {
           if (prev <= 1) {
@@ -60,30 +120,46 @@ const AssessmentInterface = () => {
     }
   }, [testData]);
 
-  const initializeTest = () => {
+  const initializeTest = async () => {
     try {
-      const studentDataStr = localStorage.getItem("studentData");
       const testDataStr = localStorage.getItem("currentTest");
 
-      if (!studentDataStr || !testDataStr) {
-        toast({ title: "Error", description: "Missing test or student data", variant: "destructive" });
-        navigate("/");
+      if (!testDataStr) {
+        toast({ title: "Error", description: "Missing test data", variant: "destructive" });
+        navigate("/student/dashboard");
         return;
       }
 
-      const student = JSON.parse(studentDataStr);
       const test = JSON.parse(testDataStr);
-
-      setStudentData(student);
       setTestData(test);
       setTestId(test.id);
+      setTimeRemaining(test.duration_minutes * 60);
+
+      // Check for existing session
+      if (user) {
+        const { data: session } = await supabase
+          .from('test_sessions')
+          .select('*')
+          .eq('test_id', test.id)
+          .eq('student_id', user.id)
+          .single();
+
+        if (session) {
+          setAnswers((session.answers as Record<number, string>) || {});
+          setCurrentQuestionIndex(session.current_question || 0);
+          setTimeRemaining(session.time_remaining || test.duration_minutes * 60);
+          setMarkedForReview(new Set((session.marked_for_review as number[]) || []));
+          setAssignedLevel(session.difficulty_level as any);
+          setPracticeComplete(session.practice_complete || false);
+          toast({ title: "Session Restored", description: "Continuing from where you left off" });
+        }
+      }
     } catch (error: any) {
       toast({ title: "Error", description: error.message || "Failed to load test", variant: "destructive" });
-      navigate("/");
+      navigate("/student/dashboard");
     }
   };
 
-  // Fisher-Yates shuffle algorithm for randomizing questions
   const shuffleArray = <T,>(array: T[]): T[] => {
     const shuffled = [...array];
     for (let i = shuffled.length - 1; i > 0; i--) {
@@ -93,41 +169,59 @@ const AssessmentInterface = () => {
     return shuffled;
   };
 
-  const loadPracticeQuestions = () => {
+  const loadQuestions = async () => {
     setLoading(true);
     try {
-      const allQuestions = JSON.parse(localStorage.getItem("questions") || "[]");
-      const practiceQs = allQuestions
-        .filter((q: Question) => q.test_id === testId && q.difficulty === 'practice');
-      
-      if (practiceQs.length > 0) {
-        // Randomize practice questions
-        setQuestions(shuffleArray(practiceQs));
+      // Fetch questions from Supabase
+      const { data: allQuestions, error } = await supabase
+        .from('questions')
+        .select('*')
+        .eq('test_id', testId)
+        .order('order_index');
+
+      if (error) throw error;
+
+      if (!allQuestions || allQuestions.length === 0) {
+        toast({ title: "Error", description: "No questions found for this test", variant: "destructive" });
         setLoading(false);
-      } else {
-        // No practice questions, find the first available difficulty level
-        toast({ title: "Notice", description: "No practice questions found. Starting main test." });
-        setPracticeComplete(true);
-        
-        // Check which levels have questions and start with easiest available
-        const easyQs = allQuestions.filter((q: Question) => q.test_id === testId && q.difficulty === 'easy');
-        const mediumQs = allQuestions.filter((q: Question) => q.test_id === testId && q.difficulty === 'medium');
-        const hardQs = allQuestions.filter((q: Question) => q.test_id === testId && q.difficulty === 'hard');
-        
-        if (easyQs.length > 0) {
-          setAssignedLevel('easy');
-          loadMainQuestions('easy');
-        } else if (mediumQs.length > 0) {
-          setAssignedLevel('medium');
-          loadMainQuestions('medium');
-        } else if (hardQs.length > 0) {
-          setAssignedLevel('hard');
-          loadMainQuestions('hard');
-        } else {
-          toast({ title: "Error", description: "No questions available for this test.", variant: "destructive" });
-          setLoading(false);
-        }
+        return;
       }
+
+      const mappedQuestions = allQuestions.map(q => ({
+        ...q,
+        options: q.options as string[] | null,
+      })) as Question[];
+
+      // Start with practice questions or skip to main test
+      if (!practiceComplete) {
+        const practiceQs = mappedQuestions.filter(q => q.difficulty === 'practice');
+        if (practiceQs.length > 0) {
+          setQuestions(shuffleArray(practiceQs));
+          setLoading(false);
+          return;
+        }
+        // No practice questions, start main test
+        setPracticeComplete(true);
+      }
+
+      // Load main test questions based on assigned level or find first available
+      const level = assignedLevel || 'easy';
+      let mainQs = mappedQuestions.filter(q => q.difficulty === level);
+      
+      if (mainQs.length === 0) {
+        // Try other levels
+        mainQs = mappedQuestions.filter(q => q.difficulty === 'easy') ||
+                 mappedQuestions.filter(q => q.difficulty === 'medium') ||
+                 mappedQuestions.filter(q => q.difficulty === 'hard');
+      }
+
+      if (mainQs.length > 0) {
+        setQuestions(shuffleArray(mainQs));
+      } else {
+        toast({ title: "Error", description: "No questions available", variant: "destructive" });
+      }
+      
+      setLoading(false);
     } catch (error: any) {
       toast({ title: "Error", description: error.message || "Failed to load questions", variant: "destructive" });
       setLoading(false);
@@ -141,12 +235,10 @@ const AssessmentInterface = () => {
         correct++;
       }
     });
-    const score = (correct / questions.length) * 100;
-    return Math.round(score);
+    return Math.round((correct / questions.length) * 100);
   };
 
   const assignDifficultyLevel = async (score: number) => {
-    // Determine target level based on score
     let targetLevel: "easy" | "medium" | "hard";
     
     if (score >= 75) {
@@ -157,59 +249,35 @@ const AssessmentInterface = () => {
       targetLevel = "easy";
     }
 
-    // Check which levels actually have questions
-    const allQuestions = JSON.parse(localStorage.getItem("questions") || "[]");
-    const easyQs = allQuestions.filter((q: Question) => q.test_id === testId && q.difficulty === 'easy');
-    const mediumQs = allQuestions.filter((q: Question) => q.test_id === testId && q.difficulty === 'medium');
-    const hardQs = allQuestions.filter((q: Question) => q.test_id === testId && q.difficulty === 'hard');
-    
-    // Find the best available level (target or closest available)
-    let level: "easy" | "medium" | "hard" = targetLevel;
-    
-    if (targetLevel === 'hard' && hardQs.length === 0) {
-      level = mediumQs.length > 0 ? 'medium' : (easyQs.length > 0 ? 'easy' : 'hard');
-    } else if (targetLevel === 'medium' && mediumQs.length === 0) {
-      level = easyQs.length > 0 ? 'easy' : (hardQs.length > 0 ? 'hard' : 'medium');
-    } else if (targetLevel === 'easy' && easyQs.length === 0) {
-      level = mediumQs.length > 0 ? 'medium' : (hardQs.length > 0 ? 'hard' : 'easy');
-    }
-
-    setAssignedLevel(level);
+    setAssignedLevel(targetLevel);
     setPracticeScore(score);
     setPracticeComplete(true);
 
-    const levelNote = level !== targetLevel 
-      ? ` (${targetLevel} not available)` 
-      : '';
-
     toast({
       title: "Practice Complete!",
-      description: `You scored ${score}%. Starting ${level.toUpperCase()} level test${levelNote}.`,
+      description: `You scored ${score}%. Starting ${targetLevel.toUpperCase()} level test.`,
       duration: 3000,
     });
 
-    // Reset for main test
     setAnswers({});
     setCurrentQuestionIndex(0);
     setSelectedAnswer("");
     setMarkedForReview(new Set());
 
-    loadMainQuestions(level);
-  };
-
-  const loadMainQuestions = (level: string) => {
+    // Reload questions for the assigned level
     setLoading(true);
-    try {
-      const allQuestions = JSON.parse(localStorage.getItem("questions") || "[]");
-      const mainQs = allQuestions
-        .filter((q: Question) => q.test_id === testId && q.difficulty === level);
-      // Randomize questions so different students get different order
-      setQuestions(shuffleArray(mainQs));
-      setLoading(false);
-    } catch (error: any) {
-      toast({ title: "Error", description: error.message || "Failed to load questions", variant: "destructive" });
-      setLoading(false);
+    const { data: allQuestions } = await supabase
+      .from('questions')
+      .select('*')
+      .eq('test_id', testId)
+      .eq('difficulty', targetLevel)
+      .order('order_index');
+
+    if (allQuestions && allQuestions.length > 0) {
+      const mapped = allQuestions.map(q => ({ ...q, options: q.options as string[] | null })) as Question[];
+      setQuestions(shuffleArray(mapped));
     }
+    setLoading(false);
   };
 
   const handleAnswerSelect = (answer: string) => {
@@ -220,18 +288,15 @@ const AssessmentInterface = () => {
     }));
   };
 
-  const handleNextQuestion = async () => {
+  const handleNextQuestion = () => {
     if (currentQuestionIndex < questions.length - 1) {
       setCurrentQuestionIndex(prev => prev + 1);
       setSelectedAnswer(answers[currentQuestionIndex + 1] || "");
     } else {
-      // Last question
       if (!practiceComplete) {
-        // Complete practice and assign difficulty
         const score = calculatePracticeScore();
         assignDifficultyLevel(score);
       } else {
-        // Submit main test
         handleSubmit();
       }
     }
@@ -244,16 +309,13 @@ const AssessmentInterface = () => {
     }
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (!practiceComplete) {
-      // This is practice submission
       const score = calculatePracticeScore();
       assignDifficultyLevel(score);
       return;
     }
 
-    // Main test submission
-    const endTime = new Date();
     const timeSpent = (testData?.duration_minutes * 60 || 3600) - timeRemaining;
     
     let correctAnswers = 0;
@@ -265,27 +327,37 @@ const AssessmentInterface = () => {
 
     const finalScore = Math.round((correctAnswers / questions.length) * 100);
 
-    // Save to localStorage
-    const result = {
-      studentId: studentData?.studentId,
-      testCode: testData?.testCode,
-      testTitle: testData?.title || 'Assessment',
-      subject: testData?.subject || 'General',
-      score: finalScore,
-      correctAnswers,
-      wrongAnswers: questions.length - correctAnswers,
-      totalQuestions: questions.length,
-      difficultyLevel: assignedLevel,
-      practiceScore,
-      timeSpent,
-      completedAt: endTime.toISOString(),
-      answers,
-      markedForReview: Array.from(markedForReview)
-    };
+    // Save result to Supabase
+    if (user) {
+      const { error } = await supabase
+        .from('test_results')
+        .insert({
+          test_id: testId,
+          student_id: user.id,
+          score: finalScore,
+          correct_answers: correctAnswers,
+          wrong_answers: questions.length - correctAnswers,
+          total_questions: questions.length,
+          difficulty_level: assignedLevel,
+          practice_score: practiceScore,
+          time_spent: timeSpent,
+          answers,
+        });
 
-    const results = JSON.parse(localStorage.getItem("testResults") || "[]");
-    results.push(result);
-    localStorage.setItem("testResults", JSON.stringify(results));
+      if (error) {
+        console.error('Error saving result:', error);
+      }
+
+      // Delete the session since test is complete
+      await supabase
+        .from('test_sessions')
+        .delete()
+        .eq('test_id', testId)
+        .eq('student_id', user.id);
+    }
+
+    // Clear localStorage
+    localStorage.removeItem('currentTest');
 
     toast({
       title: "Test Submitted!",
@@ -325,11 +397,7 @@ const AssessmentInterface = () => {
 
   const currentQuestion = questions[currentQuestionIndex];
   const isLastQuestion = currentQuestionIndex === questions.length - 1;
-
-  // Group questions by passage_id for rendering
-  const currentPassage = currentQuestion.passage_id 
-    ? questions.find(q => q.passage_id === currentQuestion.passage_id && q.passage_text)
-    : null;
+  const hasPassage = currentQuestion.passage_text;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-background via-accent/20 to-primary/10">
@@ -390,21 +458,23 @@ const AssessmentInterface = () => {
         </div>
       </div>
 
-      {/* Main Content - 60/40 Split */}
+      {/* Main Content */}
       <div className="max-w-7xl mx-auto px-6 pb-8">
-        <div className="grid lg:grid-cols-[60%_40%] gap-6">
-          {/* Left Panel - Reading Passage */}
-          <div className="passage-bubble p-6">
-            <div className="flex items-center gap-3 mb-4">
-              <BookOpen className="h-5 w-5 text-primary" />
-              <h3 className="font-semibold text-lg">
-                {currentPassage?.passage_title || currentQuestion.passage_title || 'Reading Passage'}
-              </h3>
+        <div className={`grid ${hasPassage ? 'lg:grid-cols-[60%_40%]' : 'lg:grid-cols-1 max-w-3xl mx-auto'} gap-6`}>
+          {/* Left Panel - Reading Passage (only show if passage exists) */}
+          {hasPassage && (
+            <div className="passage-bubble p-6">
+              <div className="flex items-center gap-3 mb-4">
+                <BookOpen className="h-5 w-5 text-primary" />
+                <h3 className="font-semibold text-lg">
+                  {currentQuestion.passage_title || 'Reading Passage'}
+                </h3>
+              </div>
+              <div className="passage-text">
+                {currentQuestion.passage_text}
+              </div>
             </div>
-            <div className="passage-text">
-              {currentPassage?.passage_text || currentQuestion.passage_text || 'No passage available.'}
-            </div>
-          </div>
+          )}
 
           {/* Right Panel - Question & Answers */}
           <div className="space-y-6">
@@ -413,7 +483,6 @@ const AssessmentInterface = () => {
               <div className="mb-4">
                 <p className="text-sm text-muted-foreground mb-2">
                   Question {currentQuestionIndex + 1} of {questions.length}
-                  {currentQuestion.sub_question_label && ` (${currentQuestion.sub_question_label})`}
                 </p>
                 <h4 className="font-semibold text-lg text-foreground mb-2">
                   {currentQuestion.question_text}
@@ -473,38 +542,48 @@ const AssessmentInterface = () => {
                     })}
                   </>
                 )}
-
               </div>
             </div>
 
-            {/* Navigation Buttons */}
-            <div className="flex gap-3">
+            {/* Navigation */}
+            <div className="flex items-center justify-between gap-4">
               <Button
+                variant="outline"
                 onClick={handlePrevQuestion}
                 disabled={currentQuestionIndex === 0}
-                variant="outline"
-                className="flex-1 rounded-xl"
+                className="rounded-xl"
               >
-                <ChevronLeft className="h-4 w-4 mr-2" />
+                <ChevronLeft className="h-4 w-4 mr-1" />
                 Previous
               </Button>
 
               <Button
-                onClick={toggleMarkForReview}
                 variant="outline"
-                className={`rounded-xl ${markedForReview.has(currentQuestionIndex) ? 'border-warning text-warning' : ''}`}
+                onClick={toggleMarkForReview}
+                className={`rounded-xl ${markedForReview.has(currentQuestionIndex) ? 'bg-warning/20 border-warning' : ''}`}
               >
-                <Flag className="h-4 w-4" />
+                <Flag className={`h-4 w-4 mr-1 ${markedForReview.has(currentQuestionIndex) ? 'text-warning' : ''}`} />
+                {markedForReview.has(currentQuestionIndex) ? 'Marked' : 'Mark for Review'}
               </Button>
 
               <Button
                 onClick={handleNextQuestion}
-                className="flex-1 nav-btn-next"
+                className="nav-btn-next"
               >
-                {isLastQuestion ? 'Submit' : 'Next'}
-                {!isLastQuestion && <ChevronRight className="h-4 w-4 ml-2" />}
+                {isLastQuestion ? (practiceComplete ? 'Submit Test' : 'Complete Practice') : 'Next'}
+                <ChevronRight className="h-4 w-4 ml-1" />
               </Button>
             </div>
+
+            {/* Submit Button (when at last question) */}
+            {isLastQuestion && practiceComplete && (
+              <Button
+                onClick={handleSubmit}
+                className="w-full bg-success text-success-foreground hover:bg-success/90 mt-4"
+              >
+                Submit Test
+              </Button>
+            )}
           </div>
         </div>
       </div>
