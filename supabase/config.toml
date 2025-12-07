@@ -1,7 +1,1 @@
-project_id = "ikuitvvhpcjhasozjgqi"
-
-[functions.pdf-ocr]
-verify_jwt = false
-
-[functions.parse-questions]
-verify_jwt = false
+project_id = "bxbmqvvcmogjwzmjvdsa"
