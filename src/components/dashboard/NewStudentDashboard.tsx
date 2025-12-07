@@ -6,6 +6,8 @@ import { Card } from "@/components/ui/card";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line, PieChart, Pie, Cell } from "recharts";
 import { BookOpen, TrendingUp, Award, LogOut, Code, ChartLine, History, User, ArrowLeft, CheckCircle, XCircle, Target } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/contexts/AuthContext";
+import { supabase } from "@/integrations/supabase/client";
 import sckoolLogo from "@/assets/sckool-logo.jpeg";
 
 type ActiveSection = "home" | "performance" | "history" | "profile";
@@ -13,33 +15,42 @@ type ActiveSection = "home" | "performance" | "history" | "profile";
 const NewStudentDashboard = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const [student, setStudent] = useState<any>(null);
+  const { user, profile, signOut, loading } = useAuth();
   const [testCode, setTestCode] = useState("");
   const [testResults, setTestResults] = useState<any[]>([]);
   const [activeSection, setActiveSection] = useState<ActiveSection>("home");
 
   useEffect(() => {
-    const currentStudent = localStorage.getItem("currentStudent");
-    if (!currentStudent) {
-      navigate('/');
-      return;
+    if (!loading && user) {
+      fetchResults();
     }
-    const studentData = JSON.parse(currentStudent);
-    setStudent(studentData);
+  }, [user, loading]);
 
-    const results = JSON.parse(localStorage.getItem("testResults") || "[]");
-    const studentResults = results.filter((r: any) => r.studentId === studentData.studentId);
-    setTestResults(studentResults);
-  }, [navigate]);
+  const fetchResults = async () => {
+    if (!user) return;
+    
+    const { data, error } = await supabase
+      .from('test_results')
+      .select(`
+        *,
+        tests(title, subject)
+      `)
+      .eq('student_id', user.id)
+      .order('completed_at', { ascending: false });
 
-  const handleLogout = () => {
-    localStorage.removeItem("currentStudent");
-    localStorage.removeItem("userRole");
-    toast({ title: "Logged out", description: "See you next time!" });
-    navigate('/');
+    if (error) {
+      console.error('Error fetching results:', error);
+    } else {
+      setTestResults(data || []);
+    }
   };
 
-  const handleEnterTestCode = () => {
+  const handleLogout = async () => {
+    await signOut();
+    toast({ title: "Logged out", description: "See you next time!" });
+  };
+
+  const handleEnterTestCode = async () => {
     if (!testCode.trim()) {
       toast({ title: "Error", description: "Please enter a test code", variant: "destructive" });
       return;
@@ -50,31 +61,45 @@ const NewStudentDashboard = () => {
       return;
     }
 
-    const tests = JSON.parse(localStorage.getItem("tests") || "[]");
-    const test = tests.find((t: any) => t.testCode === testCode.toUpperCase());
+    // Check if test exists
+    const { data: test, error } = await supabase
+      .from('tests')
+      .select('*')
+      .eq('test_code', testCode.toUpperCase())
+      .eq('is_active', true)
+      .single();
 
-    if (!test) {
+    if (error || !test) {
       toast({ title: "Error", description: "Invalid test code", variant: "destructive" });
       return;
     }
 
-    const hasAlreadyTaken = testResults.some(r => r.testCode === testCode.toUpperCase());
+    // Check if already taken
+    const hasAlreadyTaken = testResults.some(r => r.test_id === test.id);
     if (hasAlreadyTaken) {
       toast({ title: "Already Taken", description: "You have already completed this test", variant: "destructive" });
       return;
     }
 
+    // Store test data for assessment
     localStorage.setItem('currentTest', JSON.stringify(test));
-    localStorage.setItem("studentData", JSON.stringify(student));
     navigate('/assessment');
   };
 
-  if (!student) return null;
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="animate-pulse text-muted-foreground">Loading...</div>
+      </div>
+    );
+  }
+
+  if (!user) return null;
 
   // Calculate overall stats
-  const totalCorrect = testResults.reduce((sum, r) => sum + (r.correctAnswers || 0), 0);
-  const totalWrong = testResults.reduce((sum, r) => sum + (r.wrongAnswers || 0), 0);
-  const totalQuestions = testResults.reduce((sum, r) => sum + (r.totalQuestions || 0), 0);
+  const totalCorrect = testResults.reduce((sum, r) => sum + (r.correct_answers || 0), 0);
+  const totalWrong = testResults.reduce((sum, r) => sum + (r.wrong_answers || 0), 0);
+  const totalQuestions = testResults.reduce((sum, r) => sum + (r.total_questions || 0), 0);
   const avgScore = testResults.length > 0 
     ? (testResults.reduce((sum, r) => sum + (r.score || 0), 0) / testResults.length).toFixed(1)
     : 0;
@@ -86,7 +111,7 @@ const NewStudentDashboard = () => {
 
   const subjectData = Object.entries(
     testResults.reduce((acc: any, r) => {
-      const subject = r.subject || 'Unknown';
+      const subject = r.tests?.subject || 'Unknown';
       acc[subject] = (acc[subject] || 0) + 1;
       return acc;
     }, {})
@@ -94,13 +119,11 @@ const NewStudentDashboard = () => {
 
   const COLORS = ['hsl(var(--primary))', 'hsl(var(--secondary))', 'hsl(var(--accent))'];
 
-  // Render section content
   const renderSection = () => {
     switch (activeSection) {
       case "performance":
         return (
           <div className="space-y-6 animate-fade-in">
-            {/* Stats Summary */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <Card className="stat-card">
                 <div className="flex items-center gap-3">
@@ -232,19 +255,19 @@ const NewStudentDashboard = () => {
                 testResults.map((result, idx) => (
                   <div key={idx} className="flex justify-between items-center p-5 bg-muted/30 rounded-2xl hover:bg-muted/50 transition-colors">
                     <div className="flex-1">
-                      <p className="font-semibold text-foreground">{result.testTitle || 'Assessment'}</p>
+                      <p className="font-semibold text-foreground">{result.tests?.title || 'Assessment'}</p>
                       <p className="text-sm text-muted-foreground mt-1">
-                        {new Date(result.completedAt).toLocaleDateString()} • {result.subject || 'General'}
+                        {new Date(result.completed_at).toLocaleDateString()} • {result.tests?.subject || 'General'}
                       </p>
                       <div className="flex gap-4 mt-2 text-xs">
-                        <span className="text-success">✓ {result.correctAnswers || 0} correct</span>
-                        <span className="text-destructive">✗ {result.wrongAnswers || 0} wrong</span>
+                        <span className="text-success">✓ {result.correct_answers || 0} correct</span>
+                        <span className="text-destructive">✗ {result.wrong_answers || 0} wrong</span>
                       </div>
                     </div>
                     <div className="text-right">
                       <p className="text-3xl font-bold text-primary">{result.score}%</p>
                       <p className="text-xs text-muted-foreground">
-                        {Math.floor((result.timeSpent || 0) / 60)} min
+                        {Math.floor((result.time_spent || 0) / 60)} min
                       </p>
                     </div>
                   </div>
@@ -262,26 +285,26 @@ const NewStudentDashboard = () => {
             <div className="grid md:grid-cols-2 gap-6">
               <div className="space-y-4">
                 <div className="p-4 bg-muted/30 rounded-xl">
-                  <p className="text-xs text-muted-foreground uppercase tracking-wide">Student ID</p>
-                  <p className="text-lg font-semibold mt-1">{student.studentId}</p>
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide">Email</p>
+                  <p className="text-lg font-semibold mt-1">{user.email}</p>
                 </div>
                 <div className="p-4 bg-muted/30 rounded-xl">
                   <p className="text-xs text-muted-foreground uppercase tracking-wide">Full Name</p>
-                  <p className="text-lg font-semibold mt-1">{student.fullName}</p>
+                  <p className="text-lg font-semibold mt-1">{profile?.full_name || 'Not set'}</p>
                 </div>
                 <div className="p-4 bg-muted/30 rounded-xl">
                   <p className="text-xs text-muted-foreground uppercase tracking-wide">Grade & Class</p>
-                  <p className="text-lg font-semibold mt-1">{student.grade}-{student.class}</p>
+                  <p className="text-lg font-semibold mt-1">{profile?.grade || '-'}-{profile?.class || '-'}</p>
                 </div>
               </div>
               <div className="space-y-4">
                 <div className="p-4 bg-muted/30 rounded-xl">
                   <p className="text-xs text-muted-foreground uppercase tracking-wide">Gender</p>
-                  <p className="text-lg font-semibold mt-1">{student.gender}</p>
+                  <p className="text-lg font-semibold mt-1">{profile?.gender || 'Not set'}</p>
                 </div>
                 <div className="p-4 bg-muted/30 rounded-xl">
                   <p className="text-xs text-muted-foreground uppercase tracking-wide">Age</p>
-                  <p className="text-lg font-semibold mt-1">{student.age} years</p>
+                  <p className="text-lg font-semibold mt-1">{profile?.age ? `${profile.age} years` : 'Not set'}</p>
                 </div>
                 <div className="p-4 bg-primary/10 rounded-xl">
                   <p className="text-xs text-primary uppercase tracking-wide">Tests Completed</p>
@@ -313,7 +336,7 @@ const NewStudentDashboard = () => {
                   activeSection === "history" ? "Test History" : "Profile"
                 )}
               </h1>
-              <p className="text-muted-foreground">Welcome back, {student.fullName}!</p>
+              <p className="text-muted-foreground">Welcome back, {profile?.full_name || 'Student'}!</p>
             </div>
           </div>
           <Button variant="outline" onClick={handleLogout} className="rounded-xl">
@@ -387,37 +410,33 @@ const NewStudentDashboard = () => {
             </div>
 
             {/* Navigation Bubbles */}
-            <h2 className="text-xl font-semibold mb-6">Quick Access</h2>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              <button onClick={() => setActiveSection("performance")} className="nav-bubble">
-                <div className="nav-bubble-icon">
-                  <ChartLine className="h-8 w-8 text-primary" />
-                </div>
-                <div>
-                  <h3 className="text-xl font-semibold text-foreground">Performance</h3>
-                  <p className="text-sm text-muted-foreground mt-1">View your progress & analytics</p>
-                </div>
-              </button>
+            <div className="grid grid-cols-3 gap-6">
+              <div
+                onClick={() => setActiveSection("performance")}
+                className="nav-bubble group cursor-pointer"
+              >
+                <ChartLine className="h-10 w-10 mb-3 text-primary group-hover:scale-110 transition-transform" />
+                <p className="font-semibold">Performance</p>
+                <p className="text-xs text-muted-foreground mt-1">View your stats</p>
+              </div>
 
-              <button onClick={() => setActiveSection("history")} className="nav-bubble">
-                <div className="nav-bubble-icon">
-                  <History className="h-8 w-8 text-primary" />
-                </div>
-                <div>
-                  <h3 className="text-xl font-semibold text-foreground">Test History</h3>
-                  <p className="text-sm text-muted-foreground mt-1">All your completed tests</p>
-                </div>
-              </button>
+              <div
+                onClick={() => setActiveSection("history")}
+                className="nav-bubble group cursor-pointer"
+              >
+                <History className="h-10 w-10 mb-3 text-secondary group-hover:scale-110 transition-transform" />
+                <p className="font-semibold">History</p>
+                <p className="text-xs text-muted-foreground mt-1">Past tests</p>
+              </div>
 
-              <button onClick={() => setActiveSection("profile")} className="nav-bubble">
-                <div className="nav-bubble-icon">
-                  <User className="h-8 w-8 text-primary" />
-                </div>
-                <div>
-                  <h3 className="text-xl font-semibold text-foreground">Profile</h3>
-                  <p className="text-sm text-muted-foreground mt-1">Your personal information</p>
-                </div>
-              </button>
+              <div
+                onClick={() => setActiveSection("profile")}
+                className="nav-bubble group cursor-pointer"
+              >
+                <User className="h-10 w-10 mb-3 text-accent group-hover:scale-110 transition-transform" />
+                <p className="font-semibold">Profile</p>
+                <p className="text-xs text-muted-foreground mt-1">Your details</p>
+              </div>
             </div>
           </>
         ) : (
